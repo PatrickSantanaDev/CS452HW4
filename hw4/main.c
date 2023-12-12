@@ -5,73 +5,102 @@
 
 #include "lawn.h"
 #include "mole.h"
-#include "threads.h"
 #include "error.h"
 
-#include "mdeq.h"
+#include <pthread.h>
+#include "mtq.h"
+#include "threads.h"
 
-// Intializes queue to null
-Mdeq queue = NULL;
+// thread function sig
+typedef void *(*TFunction)(void *);
 
-// <summary>Frees a mole from memory</summary>
-// <param = "d">The mole data to delete</param>
-static void deleteMole(Data d){
-  Mole m = (Mole)d;
-  free(m);
-}
+// intialize mtq to null
+Mtq mtq = NULL;
 
-// <summary>Produces a mole and adds it to the queue</summary>
-// <param = "args">The arguments to pass into the produce function (lawn, queue)</param>
-static void *produce(void *args)
+/**
+ * Creates a new mole and enqueues it to a mtq.
+ *
+ * @param a A pointer to a void pointer array.
+ *             a[0] is expected to be a pointer to a mtq object and a[1] is expected to be a pointer to a lawn object.
+ *
+ * @return null upon success
+ */
+static void *produce(void *a)
 {
-  void **newArgs = args;
-  Lawn l = newArgs[0];
-  Mdeq queue = newArgs[1];
-  Mole mole = mole_new(l, 0, 0);
-
-  mdeq_tail_put(queue, mole);
-  return 0;
+    void **arg = a;
+    Mtq mtq = arg[0];
+    Lawn l = arg[1];
+    // add a new mole to the tail of mtq
+    mtq_tail_put(mtq, mole_new(l, 0, 0));
+    return 0;
 }
 
-// <summary>Consumes a mole and removes it from the queue</summary>
-static void *consume(void *args)
+/**
+ * Consumes a mole by removing it from the mtq head and performing a whack.
+ *
+ * @param a A pointer to a void pointer array.
+ *             a[0] is expected to be a pointer to a mtq
+ *
+ * @return NULL upon success
+ */
+static void *consume(void *a)
+{    
+    void **arg = a;
+    Mtq mtq = arg[0];
+    // retrieve and remove a mole from the head of mtq
+    Mole whacked = (Mole)mtq_head_get(mtq);
+    // whack mole
+    mole_whack(whacked);
+    // success
+    return 0;
+}
+
+/**
+ * Frees the memory allocated to a mole object after it has been processed.
+ *
+ * @param d data object for mole to be deleted.
+ */
+static void free_mole(Data d)
 {
-  void **newArgs = args;
-  Mdeq queue = newArgs[1];
-  Mole whackedMole = (Mole) mdeq_head_get(queue);
-  mole_whack(whackedMole);
-  return 0;
+    Mole m = (Mole)d;
+    free(m);
 }
+
 
 int main()
 {
-  srandom(time(0));
+    srandom(time(0));
 
-  
-  // Number of threads to create and the max number of items in queue
-  const int n = 10;
-  const int maxCap = 4;
+    // max capacity of mtq - capacity of four to cause produce congestion
+    const int mtqMax = 4;
 
-  // Creates a new lawn and queue
-  Lawn lawn = lawn_new(0, 0);
-  queue = mdeq_new(maxCap);
+    // num threads created
+    const int n = 15;
 
-  // Allocates arguments for the lawn and queue pointers
-  void **args = malloc(sizeof(void*) * 2);
-  if(!args){
-    ERROR("Failed to malloc args");
-  }
-  args[0] = lawn;
-  args[1] = queue;
-  
-  // Consumes and produces n threads and waits on them to finish
-  pthread_t** consumeThreads = create_thread(consume, n, args);
-  pthread_t** produceThreads = create_thread(produce, n, args);
-  wait_thread(produceThreads, n);
-  wait_thread(consumeThreads, n);
- 
+    // create new mtq and lawn
+    mtq = mtq_new(mtqMax);
+    Lawn lawn = lawn_new(0, 0);
 
-  lawn_free(lawn);
-  free(args);
-  mdeq_del(queue, &deleteMole);
+    // allocate args for mtq and lawn pointers
+    void **threadArgs = malloc(sizeof(void *) * 2);
+    if (!threadArgs)
+    {
+        ERROR("Failed malloc for threadArgs");
+    }
+
+    threadArgs[0] = mtq;
+    threadArgs[1] = lawn;
+
+    // consume/produce n threads
+    pthread_t **produceThreads = create_threads(produce, n, threadArgs);
+    pthread_t **consumeThreads = create_threads(consume, n, threadArgs);
+
+    // wait for all threads to finish
+    wait_threads(produceThreads, n);
+    wait_threads(consumeThreads, n);
+
+    // cleanup
+    lawn_free(lawn);
+    free(threadArgs);
+    mtq_del(mtq, &free_mole);
 }

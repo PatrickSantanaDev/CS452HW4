@@ -1,159 +1,274 @@
-#include "mtq.h"
-#include "pthread.h"
 #include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
 
-// Defines the condition to signal to wake up a thread
-#define signal(conditionVar)\
-    pthread_cond_signal(conditionVar);\
+#include "mtq.h"
+#include "pthread.h"
 
-// Thread sleeps until woken up and condition is false
-#define waitPattern(condition, cv, mutex);\
-while(condition)\
-{\
-    pthread_cond_wait(cv, mutex);\
-}\
-
-// Multithreaded pattern for void patterns in the mdeq
-#define voidPattern(rep, condition, function) \
-rep = (Mrep) rep;\
-pthread_mutex_lock(&rep->mutex);\
-waitPattern(condition, &rep->consumed, &rep->mutex);\
-function;\
-signal(&rep->produced);\
-pthread_mutex_unlock(&rep->mutex);\
-
-// Multithreaded pattern for non void returns in the mdeq
-#define returnPattern(rep, condition, function, signalConsumed)\
-rep = (Mrep) rep;\
-pthread_mutex_lock(&rep->mutex);\
-waitPattern(condition, &rep->produced, &rep->mutex)\
-Data returnVal = (Data) function;\
-if(signalConsumed){\
-signal(&rep->consumed);\
-}\
-pthread_mutex_unlock(&rep->mutex);\
-return returnVal;\
-
-// Structure to represent the multithreaded queue
-typedef struct{
-    int maxCapacity;
-    pthread_mutex_t mutex;
-    pthread_cond_t consumed;
-    pthread_cond_t produced;
+// Structure to represent mtq
+typedef struct
+{
+    int max;                 // max number of items that can be in the mtq at once
+    pthread_mutex_t lock;    // ensures mtq is accessed by only one thread at a time/ prevent race conditions
+    pthread_cond_t consumed; // signals when data has been consumed from mtq
+    pthread_cond_t produced; // signals when new data has been produced to the queue
     Deq q;
 } *Mrep;
 
-// <summary>Creates a new multithreaded queue</summary>
-// <param = "capacity">The max number of items that can be in the queue at once</param>
-// <returns>A new multithreaded deq</returns>
-Mdeq mdeq_new(int capacity){
-    Mrep mdeq = (Mrep) malloc(sizeof(*mdeq));
-    if(!mdeq){
-        ERROR("Failed to malloc mdeq");
-    }
-    mdeq->q = deq_new();
-    mdeq->maxCapacity = capacity;
-    pthread_mutex_init(&mdeq->mutex, 0);
-
-    if(!&mdeq->mutex){
-        ERROR("Failed to initalize the mutex");
-    }
-    pthread_cond_init(&mdeq->consumed, 0);
-
-    if(!&mdeq->consumed){
-        ERROR("Failed to intialize consumed condition variable");
-    }
-    pthread_cond_init(&mdeq->produced, 0 );
-
-    if(!&mdeq->produced){
-        ERROR("Failed to intialize the produced condition variable");
+/**
+ * Creates a new mtq with a maximum size.
+ *
+ * @param mtqMax The maximum number of elements the mtq can hold.
+ * @return new mtq object.
+ */
+Mtq mtq_new(int mtqMax)
+{
+    Mrep mtq = (Mrep)malloc(sizeof(*mtq));
+    if (!mtq)
+    {
+        ERROR("Failed malloc for mtq");
     }
 
-    return (Mdeq) mdeq;
+    mtq->q = deq_new();
+    mtq->max = mtqMax;
+
+    if (pthread_mutex_init(&mtq->lock, NULL) != 0)
+    {
+        ERROR("Failed lock initialization");
+    }
+
+    if (pthread_cond_init(&mtq->consumed, NULL) != 0)
+    {
+        ERROR("Failed initialization of consumed variable");
+    }
+
+    if (pthread_cond_init(&mtq->produced, NULL) != 0)
+    {
+        ERROR("Failed initialization of produced variable");
+    }
+
+    return (Mtq)mtq;
 }
 
-// <summary>Wrapped deq put tail function that implements mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to add to</param>
-// <param = "data">The data to put into the queue</param>
-void mdeq_tail_put(Mdeq mdeq, Data d){
-    Mrep rep = (Mrep)(mdeq);
-    voidPattern(rep, deq_len(rep->q)>= rep->maxCapacity && rep->maxCapacity > 0, deq_tail_put(rep->q, d));
+/**
+ * Inserts data at the head of the mtq.
+ * This function is thread-safe, meaning it locks the queue during insertion.
+ * If the queue is full, it will wait until space is available.
+ *
+ * @param mtq The mtq where the data will be inserted.
+ * @param d The data to insert at the head of the mtq.
+ */
+void mtq_head_put(Mtq mtq, Data d)
+{
+    Mrep rep = (Mrep)(mtq);
+    pthread_mutex_lock(&rep->lock);
 
+    while (deq_len(rep->q) >= rep->max && rep->max > 0)
+    {
+        pthread_cond_wait(&rep->consumed, &rep->lock);
+    }
+
+    deq_head_put(rep->q, d);
+    pthread_cond_signal(&rep->produced);
+    pthread_mutex_unlock(&rep->lock);
 }
 
-// <summary>Wrapped deq head tail function that implements mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to add to</param>
-// <param = "data">The data to put into the queue</param>
-void mdeq_head_put(Mdeq mdeq, Data d){
-    Mrep rep = (Mrep)(mdeq);
-    voidPattern(rep, deq_len(rep->q)>= rep->maxCapacity && rep->maxCapacity > 0, deq_head_put(rep->q, d));
+/**
+ * Inserts data at the tail of the mtq.
+ * This function is thread-safe, meaning it locks the queue during insertion.
+ * If the queue is full, it will wait until space is available.
+ *
+ * @param mtq The mtq where the data will be inserted.
+ * @param d The data to insert at the tail of the mtq.
+ */
+void mtq_tail_put(Mtq mtq, Data d)
+{
+    Mrep rep = (Mrep)(mtq);
+    pthread_mutex_lock(&rep->lock);
+
+    while (deq_len(rep->q) >= rep->max && rep->max > 0)
+    {
+        pthread_cond_wait(&rep->consumed, &rep->lock);
+    }
+
+    deq_tail_put(rep->q, d);
+    pthread_cond_signal(&rep->produced);
+    pthread_mutex_unlock(&rep->lock);
 }
 
-// <summary>Wrapped deq head get function that implements mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to retrieve the data from</param>
-// <returns>Returns the data that was at the head</returns>
-Data mdeq_head_get(Mdeq mdeq){
-    Mrep rep = (Mrep)(mdeq);
-    Data returnData = returnPattern(rep, deq_len(rep->q)==0, deq_head_get(rep->q), 1);
+/**
+ * Retrieves and removes data from the head of the mtq.
+ * This function is thread-safe, meaning it locks the queue during removal.
+ * If the queue is empty, it will wait until data is available.
+ *
+ * @param mtq The mtq to retrieve the data from.
+ * @return The data removed from the head of the mtq.
+ */
+Data mtq_head_get(Mtq mtq)
+{
+    Mrep rep = (Mrep)(mtq);
+    Data returnData;
+
+    pthread_mutex_lock(&rep->lock);
+    while (deq_len(rep->q) == 0)
+    {
+        pthread_cond_wait(&rep->produced, &rep->lock);
+    }
+
+    returnData = deq_head_get(rep->q);
+    pthread_cond_signal(&rep->consumed);
+    pthread_mutex_unlock(&rep->lock);
+
     return returnData;
 }
 
-// <summary>Wrapped deq head get function that implements mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to retrieve the data from</param>
-// <returns>Returns the data that was at the head</returns>
-Data mdeq_tail_get(Mdeq mdeq){
-    Mrep rep = (Mrep)(mdeq);
-    Data returnData = returnPattern(rep, deq_len(rep->q)==0, deq_tail_get(rep->q), 1);
+/**
+ * Retrieves and removes data from the tail of the mtq.
+ * This function is thread-safe, locking the queue during removal.
+ * If the queue is empty, it waits until data is available.
+ *
+ * @param mtq The mtq to retrieve the data from.
+ * @return The data removed from the tail of the mtq.
+ */
+Data mtq_tail_get(Mtq mtq)
+{
+    Mrep rep = (Mrep)(mtq);
+    Data returnData;
+
+    pthread_mutex_lock(&rep->lock);
+    while (deq_len(rep->q) == 0)
+    {
+        pthread_cond_wait(&rep->produced, &rep->lock);
+    }
+
+    returnData = deq_tail_get(rep->q);
+    pthread_cond_signal(&rep->consumed);
+    pthread_mutex_unlock(&rep->lock);
+
     return returnData;
 }
 
-// <summary>Wrapped deq head ith function for mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to retrieve the data from</param>
-// <param = "i">The index to find</param>
-// <returns>Returns the data that was at i</returns>
-Data mdeq_head_ith(Mdeq mdeq, int i){
-    Mrep rep = (Mrep)(mdeq);
-    Data returnData = returnPattern(rep, deq_len(rep->q)-1<i, deq_head_ith(rep->q, i), 0);
+/**
+ * Retrieves an element from a specific position from the head of the mtq.
+ * This function is thread-safe, locking the queue during the retrieval.
+ * If the specified index is not available, it waits until it is.
+ *
+ * @param mtq The mtq to retrieve from.
+ * @param i The index position from the head of the mtq.
+ * @return The data at the ith position from the head of the mtq.
+ */
+Data mtq_head_ith(Mtq mtq, int i)
+{
+    Mrep rep = (Mrep)(mtq);
+    Data returnData;
+
+    pthread_mutex_lock(&rep->lock);
+    while (deq_len(rep->q) - 1 < i)
+    {
+        pthread_cond_wait(&rep->produced, &rep->lock);
+    }
+
+    returnData = deq_head_ith(rep->q, i);
+    pthread_cond_signal(&rep->consumed);
+    pthread_mutex_unlock(&rep->lock);
+
     return returnData;
 }
 
-// <summary>Wrapped deq head ith function for mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to retrieve the data from</param>
-// <param = "i">The index to find</param>
-// <returns>Returns the data that was at i</returns>
-Data mdeq_tail_ith(Mdeq mdeq, int i){
-    Mrep rep = (Mrep)(mdeq);
-    Data returnData = returnPattern(rep, deq_len(rep->q)-1<i, deq_tail_ith(rep->q, i), 0);
+/**
+ * Retrieves an element from a specific position from the tail of the mtq.
+ * This function is thread-safe, locking the queue during the operation.
+ * If the specified index is not available, it waits until it is.
+ *
+ * @param mtq The mtq to retrieve from.
+ * @param i The index position from the tail of the mtq.
+ * @return The data at the ith position from the tail of the mtq.
+ */
+Data mtq_tail_ith(Mtq mtq, int i)
+{
+    Mrep rep = (Mrep)(mtq);
+    Data returnData;
+
+    pthread_mutex_lock(&rep->lock);
+    while (deq_len(rep->q) - 1 < i)
+    {
+        pthread_cond_wait(&rep->produced, &rep->lock);
+    }
+
+    returnData = deq_tail_ith(rep->q, i);
+    pthread_cond_signal(&rep->consumed);
+    pthread_mutex_unlock(&rep->lock);
+
     return returnData;
 }
 
-// <summary>Wrapped deq head rem function for mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to remove the data from</param>
-// <param = "d">The data to find and remove</param>
-Data mdeq_head_rem(Mdeq mdeq, Data d){
-    Mrep rep = (Mrep)(mdeq);
-    Data returnData = returnPattern(rep, deq_len(rep->q)==0, deq_head_rem(rep->q, d), 1);
-    return returnData;
-}
-// <summary>Wrapped deq tail rem function for mutually exclusive access</summary>
-// <param = "mdeq">The mdeq to remove the data from</param>
-// <param = "d">The data to find and remove</param>
-Data mdeq_tail_rem(Mdeq mdeq, Data d){
-    Mrep rep = (Mrep)(mdeq);
-    Data returnData = returnPattern(rep, deq_len(rep->q)==0, deq_tail_rem(rep->q, d), 1);
+/**
+ * Removes an element from the head of the mtq.
+ * This function is thread-safe, locking the queue during removal.
+ * If the queue is empty, it waits until data is available.
+ *
+ * @param mtq The mtq to remove from.
+ * @param d The data to be found and removed from the head of the mtq.
+ * @return The removed data from the head of the mtq.
+ */
+Data mtq_head_rem(Mtq mtq, Data d)
+{
+    Mrep rep = (Mrep)(mtq);
+    Data returnData;
+
+    pthread_mutex_lock(&rep->lock);
+    while (deq_len(rep->q) == 0)
+    {
+        pthread_cond_wait(&rep->produced, &rep->lock);
+    }
+
+    returnData = deq_head_rem(rep->q, d);
+    pthread_cond_signal(&rep->consumed);
+    pthread_mutex_unlock(&rep->lock);
+
     return returnData;
 }
 
-// <summary>Deconstructs the mdeq</summary>
-// <param = "mdeq">The mdeq to deconstruct</param>
-// <param = "data">The function to deconstruct any data in the structure</param>
-void mdeq_del(Mdeq mdeq, DeqMapF remFunction){
-    Mrep rep = (Mrep)(mdeq);
-    pthread_mutex_destroy(&rep->mutex);
+/**
+ * Removes an element from the tail of the mtq.
+ * This function is thread-safe, locking the queue during removal.
+ * If the queue is empty, it waits until data is available.
+ *
+ * @param mtq The mtq to remove from.
+ * @param d The data to be found and removed from the tail of the mtq.
+ * @return The removed data from the tail of the mtq.
+ */
+Data mtq_tail_rem(Mtq mtq, Data d)
+{
+    Mrep rep = (Mrep)(mtq);
+    Data returnData;
+
+    pthread_mutex_lock(&rep->lock);
+    while (deq_len(rep->q) == 0)
+    {
+        pthread_cond_wait(&rep->produced, &rep->lock);
+    }
+
+    returnData = deq_tail_rem(rep->q, d);
+    pthread_cond_signal(&rep->consumed);
+    pthread_mutex_unlock(&rep->lock);
+
+    return returnData;
+}
+
+/**
+ * Deallocates memory used by the mtq and destroys mutexes and condition variables.
+ * Deq deletion included.
+ *
+ * @param mtq mtq to be deleted.
+ * @param f function pointer for remove elements from the underlying deq.
+ */
+void mtq_del(Mtq mtq, DeqMapF f)
+{
+    Mrep rep = (Mrep)(mtq);
+    pthread_mutex_destroy(&rep->lock);
     pthread_cond_destroy(&rep->produced);
     pthread_cond_destroy(&rep->consumed);
-    deq_del(rep->q, remFunction);
+    deq_del(rep->q, f);
     free(rep);
 }

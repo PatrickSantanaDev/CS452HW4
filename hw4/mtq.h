@@ -1,16 +1,16 @@
 #include "deq.h"
 
-typedef void* Mdeq;
-void mdeq_del(Mdeq, DeqMapF);
-Mdeq mdeq_new(int);
+typedef void* Mtq;
+void mtq_del(Mtq, DeqMapF);
+Mtq mtq_new(int);
 
-void mdeq_tail_put(Mdeq, Data);
-void mdeq_head_put(Mdeq, Data);
+void mtq_tail_put(Mtq, Data);
+void mtq_head_put(Mtq, Data);
 
-Data mdeq_head_get(Mdeq);
-Data mdeq_tail_get(Mdeq);
-Data mdeq_head_ith(Mdeq, int);
-Data mdeq_tail_ith(Mdeq, int);
+Data mtq_head_get(Mtq);
+Data mtq_tail_get(Mtq);
+Data mtq_head_ith(Mtq, int);
+Data mtq_tail_ith(Mtq, int);
 
-Data mdeq_tail_rem(Mdeq, Data);
-Data mdeq_head_rem(Mdeq, Data);
+Data mtq_tail_rem(Mtq, Data);
+Data mtq_head_rem(Mtq, Data);
